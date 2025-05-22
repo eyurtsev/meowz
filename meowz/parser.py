@@ -1,179 +1,68 @@
-from dataclasses import dataclass
-from typing import List, Optional, Union
+from lark import Lark, Token, Transformer
 
-from lark import Lark
+from meowz.ast import (
+    Node, Document, Heading, TextInline, LinkInline, Inline, Paragraph,
+    CodeBlock, ListItem, BulletList, QuoteBlock, Tab, TabBlock, Admonition
+)
 
-from meowz.grammar import grammar
+grammar = r"""
+start: block+
 
-# Lark grammar for a subset of Markdown with mkdocs-style extensions
+block: heading
+     | admonition
+     | tab_block
+     | code_block
+     | quote_block
+     | list_block
+     | paragraph
+
+heading: HASHES WS_INLINE inline NEWLINE    -> heading
+
+admonition: ADMO_TAG WS_INLINE STRING NEWLINE INDENT block+ DEDENT    -> admonition
+
+# mkdocs-material tabs
+tab_block: tab_header+ tab_body             -> tab_block
+tab_header: "===" WS_INLINE STRING NEWLINE -> tab_header
+tab_body: INDENT block+ DEDENT               -> tab_body
+
+# fenced code blocks
+code_block: "```" LANGUAGE? NEWLINE code_lines "```" NEWLINE?  -> code_block
+code_lines: /(.|\n)*?(?=```)/
+
+# blockquote
+quote_block: ( ">" WS_INLINE? inline NEWLINE )+   -> quote_block
+
+# bullet lists
+list_block: list_item+                             -> list_block
+list_item: LIST_MARKER WS_INLINE? inline NEWLINE (INDENT list_item+ DEDENT)?   -> list_item
+
+# paragraphs (simple inline runs)
+paragraph: inline+ NEWLINE+                        -> paragraph
+
+# inline elements
+?inline: link                                   -> link
+       | TEXT                                   -> text
+
+link: "[" TEXT "]" "(" URL ")"           -> link
+
+HASHES: /#{1,6}/
+ADMO_TAG: "???" | "!!!"
+LIST_MARKER: /[-*+]/
+LANGUAGE: /[a-zA-Z0-9_+\-]+/
+URL: /[^()\s]+/
+TEXT: /[^\[\]\n]+/
+STRING: ESCAPED_STRING
+WS_INLINE: /[ \t]+/
+
+%import common.NEWLINE
+%import common.INDENT
+%import common.DEDENT
+%import common.ESCAPED_STRING
+%ignore /[ ]+$/
+"""
 
 # Initialize the parser
 parser = Lark(grammar, parser='lalr', propagate_positions=True)
-
-# AST node definitions
-@dataclass
-class Node:
-    pass
-
-@dataclass
-class Document(Node):
-    blocks: List[Node]
-
-@dataclass
-class Heading(Node):
-    level: int
-    text: str
-
-@dataclass
-class TextInline(Node):
-    value: str
-
-@dataclass
-class LinkInline(Node):
-    text: str
-    url: str
-
-Inline = Union[TextInline, LinkInline]
-
-@dataclass
-class Paragraph(Node):
-    inlines: List[Inline]
-
-@dataclass
-class CodeBlock(Node):
-    language: Optional[str]
-    content: str
-
-@dataclass
-class ListItem(Node):
-    blocks: List[Node]
-
-@dataclass
-class BulletList(Node):
-    items: List[ListItem]
-
-@dataclass
-class QuoteBlock(Node):
-    lines: List[str]
-
-@dataclass
-class Tab(Node):
-    title: str
-    blocks: List[Node]
-
-@dataclass
-class TabBlock(Node):
-    tabs: List[Tab]
-
-@dataclass
-class Admonition(Node):
-    tag: str             # '???' or '!!!'
-    title: str
-    blocks: List[Node]
-    foldable: bool
-
-# Visitor for printing the AST
-class ASTPrinter:
-    def __init__(self):
-        self.indent_level = 0
-
-    def _print(self, text: str):
-        print('    ' * self.indent_level + text)
-
-    def visit(self, node: Node):
-        method = getattr(self, f"visit_{type(node).__name__}", self.generic_visit)
-        method(node)
-
-    def generic_visit(self, node: Node):
-        self._print(f"{type(node).__name__}")
-        self.indent_level += 1
-        for field, value in vars(node).items():
-            if isinstance(value, list):
-                self._print(f"{field}:")
-                self.indent_level += 1
-                for item in value:
-                    if isinstance(item, Node):
-                        self.visit(item)
-                    else:
-                        self._print(repr(item))
-                self.indent_level -= 1
-            else:
-                self._print(f"{field}: {repr(value)}")
-        self.indent_level -= 1
-
-    def visit_Document(self, doc: Document):
-        self._print("Document")
-        self.indent_level += 1
-        for block in doc.blocks:
-            self.visit(block)
-        self.indent_level -= 1
-
-    def visit_Heading(self, node: Heading):
-        self._print(f"Heading(level={node.level}, text={node.text!r})")
-
-    def visit_Paragraph(self, node: Paragraph):
-        self._print("Paragraph")
-        self.indent_level += 1
-        for inline in node.inlines:
-            self.visit(inline)
-        self.indent_level -= 1
-
-    def visit_TextInline(self, node: TextInline):
-        self._print(f"TextInline({node.value!r})")
-
-    def visit_LinkInline(self, node: LinkInline):
-        self._print(f"LinkInline(text={node.text!r}, url={node.url!r})")
-
-    def visit_CodeBlock(self, node: CodeBlock):
-        lang = node.language or ''
-        self._print(f"CodeBlock(language={lang!r})")
-        self.indent_level += 1
-        for line in node.content.splitlines():
-            self._print(repr(line))
-        self.indent_level -= 1
-
-    def visit_BulletList(self, node: BulletList):
-        self._print("BulletList")
-        self.indent_level += 1
-        for item in node.items:
-            self.visit(item)
-        self.indent_level -= 1
-
-    def visit_ListItem(self, node: ListItem):
-        self._print("ListItem")
-        self.indent_level += 1
-        for blk in node.blocks:
-            self.visit(blk)
-        self.indent_level -= 1
-
-    def visit_QuoteBlock(self, node: QuoteBlock):
-        self._print("QuoteBlock")
-        self.indent_level += 1
-        for line in node.lines:
-            self._print(repr(line))
-        self.indent_level -= 1
-
-    def visit_TabBlock(self, node: TabBlock):
-        self._print("TabBlock")
-        self.indent_level += 1
-        for tab in node.tabs:
-            self.visit(tab)
-        self.indent_level -= 1
-
-    def visit_Tab(self, node: Tab):
-        self._print(f"Tab(title={node.title!r})")
-        self.indent_level += 1
-        for blk in node.blocks:
-            self.visit(blk)
-        self.indent_level -= 1
-
-    def visit_Admonition(self, node: Admonition):
-        self._print(f"Admonition(tag={node.tag!r}, title={node.title!r}, foldable={node.foldable})")
-        self.indent_level += 1
-        for blk in node.blocks:
-            self.visit(blk)
-        self.indent_level -= 1
-
 
 class MarkdownTransformer(Transformer):
     def start(self, items):
@@ -271,11 +160,7 @@ class MarkdownTransformer(Transformer):
         foldable = (tag == '???')
         return Admonition(tag=tag, title=title, blocks=blocks, foldable=foldable)
 
-# --- Parse function ---
-
 def parse(text: str) -> Document:
-    """
-    Parse the given Markdown text and return a Document AST.
-    """
+    """Parse the given Markdown text and return a Document AST. """
     tree = parser.parse(text)
     return MarkdownTransformer().transform(tree)
