@@ -5,6 +5,7 @@ description = "meowz"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "lark>=1.2.2",
 ]
 
 #[project.scripts]
