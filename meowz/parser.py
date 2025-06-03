@@ -3,10 +3,11 @@ from dataclasses import dataclass
 from typing import List, Optional, Union
 
 
-# AST node definitions with line numbers
+# AST node definitions with start_line and limit_line
 @dataclass
 class Node:
-    line: int
+    start_line: int
+    limit_line: int
 
 
 @dataclass
@@ -102,33 +103,32 @@ class Parser:
             block = self.parse_block()
             if block:
                 blocks.append(block)
-        return Document(blocks=blocks, line=1)
+        return Document(blocks=blocks, start_line=1, limit_line=self.total + 1)
 
     def parse_block(self) -> Optional[Node]:
         line = self.peek()
-        stripped = line
         # Skip blank lines
-        if not stripped:
+        if not line:
             self.next_line()
             return None
         # Code fence
-        if stripped.startswith("```"):
+        if line.startswith("```"):
             return self.parse_code_block()
         # Heading
-        if re.match(r"#{1,6}\s+", stripped):
+        if re.match(r"#{1,6}\s+", line):
             return self.parse_heading()
         # Bullet list
-        if stripped.startswith(("- ", "+ ", "*")):
+        if line.startswith(("- ", "+ ", "* ")):
             return self.parse_bullet_list()
         # Blockquote
-        if stripped.startswith(">"):
+        if line.startswith(">"):
             return self.parse_quote_block()
         # Admonition
-        if stripped.startswith("!!!") or stripped.startswith("???"):
+        if line.startswith("!!!") or line.startswith("???"):
             return self.parse_admonition()
         # Tab block
-        if stripped.startswith("==="):
-            return self.parse_tab_block()
+        if line.startswith("==="):
+            return self.parse_simple_tab_block()
         # Paragraph
         return self.parse_paragraph()
 
@@ -142,37 +142,43 @@ class Parser:
             if line.strip().startswith("```"):
                 break
             content_lines.append(line)
+        end_ln = self.current + 1
         content = "\n".join(content_lines)
-        return CodeBlock(language=lang, content=content, line=start_ln)
+        return CodeBlock(
+            language=lang, content=content, start_line=start_ln, limit_line=end_ln
+        )
 
     def parse_heading(self) -> Heading:
+        start_ln = self.current + 1
         line = self.next_line().strip()
-        ln = self.current
+        end_ln = self.current + 1
         m = re.match(r"(#{1,6})\s+(.*)", line)
         level = len(m.group(1))
         text = m.group(2)
-        inlines = self.parse_inlines(text, ln)
-        return Heading(level=level, inlines=inlines, line=ln)
+        inlines = self.parse_inlines(text, start_ln)
+        return Heading(
+            level=level, inlines=inlines, start_line=start_ln, limit_line=end_ln
+        )
 
     def parse_bullet_list(self) -> BulletList:
-        items: List[ListItem] = []
         start_ln = self.current + 1
+        items: List[ListItem] = []
         while not self.eof():
             line = self.peek()
-            stripped = line.strip()
-            if not stripped.startswith("- "):
+            if not line.strip().startswith("- "):
                 break
             ln = self.current + 1
-            content = stripped[2:].strip()
+            content = line.strip()[2:].strip()
             inlines = self.parse_inlines(content, ln)
-            para = Paragraph(inlines=inlines, line=ln)
-            items.append(ListItem(blocks=[para], line=ln))
+            para = Paragraph(inlines=inlines, start_line=ln, limit_line=ln + 1)
+            items.append(ListItem(blocks=[para], start_line=ln, limit_line=ln + 1))
             self.next_line()
-        return BulletList(items=items, line=start_ln)
+        end_ln = self.current + 1
+        return BulletList(items=items, start_line=start_ln, limit_line=end_ln)
 
     def parse_quote_block(self) -> QuoteBlock:
-        lines: List[str] = []
         start_ln = self.current + 1
+        lines: List[str] = []
         while not self.eof():
             line = self.peek()
             if not line.lstrip().startswith(">"):
@@ -180,89 +186,117 @@ class Parser:
             content = line.lstrip()[1:].lstrip()
             lines.append(content)
             self.next_line()
-        return QuoteBlock(lines=lines, line=start_ln)
+        end_ln = self.current + 1
+        return QuoteBlock(lines=lines, start_line=start_ln, limit_line=end_ln)
 
     def parse_admonition(self) -> Admonition:
-        line = self.next_line().strip()
-        start_ln = self.current
-        parts = line.split(None, 2)
-        tag = parts[0]
-        title = parts[1] if len(parts) > 1 else ""
-        # Collect indented content
-        content_lines: List[str] = []
-        while not self.eof():
-            peek = self.peek()
-            if peek.startswith("    ") or peek.startswith("\t"):
-                content_lines.append(peek.lstrip())
-                self.next_line()
-            else:
-                break
-        # Recursively parse inner blocks
-        inner_parser = Parser("\n".join(content_lines))
-        doc = inner_parser.parse()
-        return Admonition(
-            tag=tag, title=title, blocks=doc.blocks, foldable=False, line=start_ln
-        )
-
-    def parse_tab_block(self) -> TabBlock:
         start_ln = self.current + 1
-        # consume '::: tabs'
-        self.next_line()
-        tabs: List[Tab] = []
-        current_tab: Optional[Tab] = None
+        header = self.next_line().strip()
+        parts = header.split(None, 1)
+        tag = parts[0]
+        title = parts[1].strip('"') if len(parts) > 1 else ""
+        # skip blank line
+        while not self.eof() and self.peek().strip() == "":
+            self.next_line()
         content_lines: List[str] = []
         while not self.eof():
             line = self.peek()
-            stripped = line.strip()
-            # End of tabs
-            if stripped.startswith("::: endtabs"):
-                if current_tab:
-                    inner = Parser("\n".join(content_lines))
-                    current_tab.blocks = inner.parse().blocks
-                    tabs.append(current_tab)
-                self.next_line()
-                break
-            # New tab
-            m = re.match(r":::\s*tab\s+(.*)", stripped)
-            if m:
-                if current_tab:
-                    inner = Parser("\n".join(content_lines))
-                    current_tab.blocks = inner.parse().blocks
-                    tabs.append(current_tab)
-                title = m.group(1)
-                current_tab = Tab(title=title, blocks=[], line=self.current + 1)
-                content_lines = []
+            if line.startswith("    ") or line.startswith("\t"):
+                content_lines.append(line.lstrip())
                 self.next_line()
             else:
-                content_lines.append(line)
+                break
+        end_ln = self.current + 1
+        inner = Parser("\n".join(content_lines)).parse()
+        return Admonition(
+            tag=tag,
+            title=title,
+            blocks=inner.blocks,
+            foldable=False,
+            start_line=start_ln,
+            limit_line=end_ln,
+        )
+
+    def parse_simple_tab_block(self) -> TabBlock:
+        start_ln = self.current + 1
+        tabs: List[Tab] = []
+        # Loop over consecutive tab headers
+        while not self.eof():
+            # Skip any blank lines between tabs
+            while not self.eof() and not self.peek().strip():
                 self.next_line()
-        return TabBlock(tabs=tabs, line=start_ln)
+            if self.eof():
+                break
+            line = self.peek().strip()
+            m = re.match(r"===\s*\"([^\"]+)\"", line)
+            if not m:
+                break
+            title = m.group(1)
+            tab_start = self.current + 1
+            self.next_line()  # consume the header
+            # Skip blank lines before content
+            while not self.eof() and not self.peek().strip():
+                self.next_line()
+            # Collect indented lines as content
+            content_lines: List[str] = []
+            while not self.eof() and (
+                self.peek().startswith("    ") or self.peek().startswith("\t")
+            ):
+                content_lines.append(self.peek().lstrip())
+                self.next_line()
+            # Parse inner content
+            inner = Parser("\n".join(content_lines)).parse()
+            tab_end = self.current + 1
+            tabs.append(
+                Tab(
+                    title=title,
+                    blocks=inner.blocks,
+                    start_line=tab_start,
+                    limit_line=tab_end,
+                )
+            )
+        end_ln = self.current + 1
+        return TabBlock(tabs=tabs, start_line=start_ln, limit_line=end_ln)
 
     def parse_paragraph(self) -> Paragraph:
         start_ln = self.current + 1
         lines: List[str] = []
         while not self.eof():
             line = self.peek()
-            stripped = line.strip()
-            # Stop at blank or new block start
-            if not stripped or re.match(
-                r"(?:```|#{1,6}\s+|-\s+|>\s*|!!!|\?\?\?|:::)", stripped
+            if not line.strip() or re.match(
+                r"(?:```|#{1,6}\s+|-\s+|>\s*|!!!|\?\?\?|:::)", line.strip()
             ):
                 break
-            lines.append(stripped)
+            lines.append(line.strip())
             self.next_line()
+        end_ln = self.current + 1
         text = " ".join(lines)
         inlines = self.parse_inlines(text, start_ln)
-        return Paragraph(inlines=inlines, line=start_ln)
+        return Paragraph(inlines=inlines, start_line=start_ln, limit_line=end_ln)
 
     def parse_inlines(self, text: str, line: int) -> List[Inline]:
         inlines: List[Inline] = []
         pos = 0
         for m in re.finditer(r"\[([^\]]+)\]\(([^)]+)\)", text):
             if m.start() > pos:
-                inlines.append(TextInline(value=text[pos : m.start()], line=line))
-            inlines.append(LinkInline(text=m.group(1), url=m.group(2), line=line))
+                inlines.append(
+                    TextInline(
+                        value=text[pos : m.start()],
+                        start_line=line,
+                        limit_line=line + 1,
+                    )
+                )
+            inlines.append(
+                LinkInline(
+                    text=m.group(1),
+                    url=m.group(2),
+                    start_line=line,
+                    limit_line=line + 1,
+                )
+            )
             pos = m.end()
         if pos < len(text):
-            inlines.append(TextInline(value=text[pos:], line=line))
+            inlines.append(
+                TextInline(value=text[pos:], start_line=line, limit_line=line + 1)
+            )
         return inlines
